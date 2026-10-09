@@ -381,6 +381,7 @@ enum OpenRouterAPI {
 
     /// Builds the transcription request payload.
     static func transcriptionPayload(model: String, base64Audio: String) -> [String: Any] {
+        // OpenRouter's STT endpoint ignores prompt; cleanup happens locally.
         [
             "model": model,
             "input_audio": ["data": base64Audio, "format": "wav"],
@@ -478,5 +479,88 @@ struct SessionTranscript {
             committed += " " + chunk
         }
         segment = ""
+    }
+}
+
+/// Conservative local cleanup of isolated hesitation sounds, not semantic rewriting.
+/// Keeps ordinary discourse words (а, ну, вот), quoted tokens and numeric мм units.
+enum TextCleaner {
+    private static let noTrailingCommaWords: Set<String> = [
+        "что", "чтобы", "как", "когда", "где", "если", "хотя", "и", "а", "но", "или", "да",
+        "я", "ты", "он", "она", "оно", "мы", "вы", "они",
+        "не", "ни", "же", "ли", "бы",
+        "в", "на", "с", "со", "к", "ко", "из", "у", "от", "до", "по", "о", "об", "обо", "про", "для", "через",
+        "то", "это", "этот", "эта", "эти",
+        "должен", "должна", "должны", "должно", "может", "могут", "можем", "могу",
+        "нужно", "надо", "хочу", "хочет", "хотим", "будет", "будут", "будем",
+        "that", "which", "when", "where", "if", "because", "and", "but", "or",
+        "i", "you", "he", "she", "it", "we", "they",
+        "to", "in", "on", "at", "with", "from", "of", "for",
+        "should", "would", "could", "can", "must", "will", "have", "has", "is", "are", "was", "were"
+    ]
+
+    // Both boundaries apply to EVERY alternative: never match a prefix or suffix
+    // of a real word, identifier or hyphenated name. Quoted literals stay intact.
+    private static let fillers = try! NSRegularExpression(pattern:
+        #"(?i)(?<![\p{L}\p{N}_\-—–\"'«`])(?:э+(?:[-—–]э+)*|а{2,}|а+(?:[-—–]а+)+|м{2,}|м+(?:[-—–]м+)+|эм+|хм+|гм+|ы{2,}|uh+|um+|erm|ah{2,}|hmm+|mhm)(?![\p{L}\p{N}_\-—–\"'»`])"#)
+
+    static func clean(_ input: String) -> String {
+        // Clean per line so whitespace repair can never join separate paragraphs.
+        input.components(separatedBy: "\n").map(cleanLine).joined(separator: "\n")
+    }
+
+    /// Hold the last token until the next word or a final event: interim "э"
+    /// can still grow into "экран". Disabled cleanup leaves streaming unchanged.
+    static func prepare(_ input: String, enabled: Bool, isFinal: Bool = true) -> String {
+        guard enabled else { return input }
+        let stable = isFinal ? input : input.replacingOccurrences(
+            of: #"\S+$"#, with: "", options: .regularExpression)
+        return clean(stable)
+    }
+
+    private static func cleanLine(_ input: String) -> String {
+        var text = input
+        var removed = false
+        var removedLeading = false
+        // Each pass removes one full token, including arbitrarily long sequences.
+        while let match = fillers.matches(in: text, range: NSRange(text.startIndex..., in: text)).first(where: { match in
+            guard let range = Range(match.range, in: text) else { return false }
+            if text[range].lowercased() == "мм" {
+                let preceding = text[..<range.lowerBound].split(whereSeparator: { $0.isWhitespace }).last
+                // "10 мм" and "2,5 мм" are measurements, not hesitation.
+                if let preceding, preceding.last?.isNumber == true { return false }
+            }
+            return true
+        }), let range = Range(match.range, in: text) {
+            let before = String(text[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
+            let after = String(text[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+            removed = true
+            removedLeading = removedLeading || before.isEmpty
+            var left = before
+            var right = after
+            if left.hasSuffix(",") {
+                left.removeLast()
+                if right.hasPrefix(",") {
+                    right.removeFirst()
+                    let preceding = left.split(whereSeparator: { $0.isWhitespace }).last.map(String.init) ?? ""
+                    if !left.isEmpty && !noTrailingCommaWords.contains(preceding.lowercased()) {
+                        left += ","
+                    }
+                }
+            } else if right.hasPrefix(",") {
+                right.removeFirst()
+            }
+            right = right.trimmingCharacters(in: .whitespaces)
+            text = left + (left.isEmpty || right.isEmpty ? "" : " ") + right
+        }
+        guard removed else { return input }
+        text = text.replacingOccurrences(of: #"[ \t]+([.,!?;:])"#, with: "$1", options: .regularExpression)
+        text = text.replacingOccurrences(of: #"^[.,!?;: \t]+"#, with: "", options: .regularExpression)
+        text = text.trimmingCharacters(in: .whitespaces)
+        let firstWord = text.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
+        if removedLeading, firstWord == firstWord.lowercased(), let first = text.first, first.isLowercase {
+            text = String(first.uppercased()) + text.dropFirst()
+        }
+        return text
     }
 }

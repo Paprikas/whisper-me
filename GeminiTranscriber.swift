@@ -149,11 +149,15 @@ final class GeminiTranscriber {
         request.timeoutInterval = 25.0
 
         let vocab = SettingsManager.shared.customVocab
+        let clean = SettingsManager.shared.cleanFillerWords
+        let baseInstruction = clean
+            ? "Transcribe the audio accurately into clean text. Omit non-lexical hesitation sounds (such as 'ээ', 'мм', 'а-а', 'um', 'uh'). Preserve the meaning, ordinary words, names, numbers, and deliberately quoted sounds. Do not summarize or paraphrase. "
+            : "Transcribe the audio verbatim. "
         let prompt: String
         if vocab.isEmpty {
-            prompt = "Transcribe the audio verbatim. Output only the text without quotes."
+            prompt = "\(baseInstruction)Output only the text without quotes."
         } else {
-            prompt = "Transcribe the audio verbatim. Specific terms/names: \(vocab). Output only the text without quotes."
+            prompt = "\(baseInstruction)Specific terms/names: \(vocab). Output only the text without quotes."
         }
 
         let payload: [String: Any] = [

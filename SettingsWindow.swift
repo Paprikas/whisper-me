@@ -315,6 +315,9 @@ final class SettingsWindowController: NSWindowController {
     private var soundsLabel: NSTextField!
     private var soundsCheck: NSButton!
 
+    private var cleanFillerLabel: NSTextField!
+    private var cleanFillerCheck: NSButton!
+
     private var vocabLabel: NSTextField!
     private var vocabField: NSTextField!
     private var vocabHint: NSTextField!
@@ -452,6 +455,11 @@ final class SettingsWindowController: NSWindowController {
         let (soundsRow, sLabel) = labeledRow(L10n.tr("Звук:", "Sound:"), soundsCheck)
         soundsLabel = sLabel
 
+        cleanFillerCheck = NSButton(checkboxWithTitle: L10n.tr("Очищать слова-паразиты и мычание (ээ, мм, а-а)", "Filter filler words & hesitations (um, uh)"), target: nil, action: nil)
+        cleanFillerCheck.state = settings.cleanFillerWords ? .on : .off
+        let (cleanFillerRow, cfLabel) = labeledRow(L10n.tr("Фильтр:", "Filter:"), cleanFillerCheck)
+        cleanFillerLabel = cfLabel
+
         // --- Словарь ---
         vocabField = NSTextField(string: settings.customVocab)
         vocabField.placeholderString = L10n.tr("имена, термины — через запятую", "names, terms — comma-separated")
@@ -510,7 +518,7 @@ final class SettingsWindowController: NSWindowController {
         buttonRow.translatesAutoresizingMaskIntoConstraints = false
 
         let rows: [NSView] = [providerRow, keyRow, hintRow, modelRow, modelHint, hotkeyRow, hotkeyHint,
-                              insertModeRow, insertModeHint, soundsRow, vocabRow, vocabHint,
+                              insertModeRow, insertModeHint, soundsRow, cleanFillerRow, vocabRow, vocabHint,
                               languageRow, axRow, buttonRow]
         for row in rows {
             row.widthAnchor.constraint(equalToConstant: contentWidth).isActive = true
@@ -524,6 +532,7 @@ final class SettingsWindowController: NSWindowController {
         insertModePopup.widthAnchor.constraint(equalToConstant: contentWidth - 130).isActive = true
         languagePopup.widthAnchor.constraint(equalToConstant: contentWidth - 130).isActive = true
         soundsRow.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        cleanFillerRow.heightAnchor.constraint(equalToConstant: 22).isActive = true
         buttonRow.heightAnchor.constraint(equalToConstant: 32).isActive = true
         for row in rows {
             row.setContentCompressionResistancePriority(.required, for: .vertical)
@@ -535,7 +544,7 @@ final class SettingsWindowController: NSWindowController {
             providerHeader, providerRow, separator(),
             keyHeader, keyRow, hintRow, separator(),
             recognitionHeader, modelRow, modelHint, hotkeyRow, hotkeyHint, insertModeRow, insertModeHint,
-            soundsRow, vocabRow, vocabHint, separator(),
+            soundsRow, cleanFillerRow, vocabRow, vocabHint, separator(),
             appHeader, languageRow, axRow, launchAtLoginCheck, separator(),
             buttonRow,
         ]
@@ -642,6 +651,9 @@ final class SettingsWindowController: NSWindowController {
 
         soundsLabel.stringValue = L10n.tr("Звук:", "Sound:")
         soundsCheck.title = L10n.tr("Звуковые сигналы", "Sound effects")
+
+        cleanFillerLabel.stringValue = L10n.tr("Фильтр:", "Filter:")
+        cleanFillerCheck.title = L10n.tr("Очищать слова-паразиты и мычание (ээ, мм, а-а)", "Filter filler words & hesitations (um, uh)")
 
         vocabLabel.stringValue = L10n.tr("Словарь:", "Vocabulary:")
         vocabField.placeholderString = L10n.tr("имена, термины — через запятую", "names, terms — comma-separated")
@@ -817,6 +829,7 @@ final class SettingsWindowController: NSWindowController {
             settings.insertAfterStop = insertModePopup.indexOfSelectedItem == 1
         }
         settings.playSounds = soundsCheck.state == .on
+        settings.cleanFillerWords = cleanFillerCheck.state == .on
         settings.customVocab = vocabField.stringValue.trimmingCharacters(in: .whitespaces)
         HotKeyManager.shared.registerCurrent()
         window?.close()

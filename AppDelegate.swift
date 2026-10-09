@@ -26,6 +26,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Words already injected during the current streaming session.
     /// Tracked by actual words to safely handle recognizer prefix revisions.
     private var injectedWords: [String] = []
+    private var pendingInterim = ""
+    private var cleanCurrentRecording = true
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
@@ -149,6 +151,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         isProcessing = false
         isBatchRunning = false
         injectedWords = []
+        pendingInterim = ""
+        cleanCurrentRecording = SettingsManager.shared.cleanFillerWords
 
         if SettingsManager.shared.playSounds {
             NSSound(named: "Tink")?.play()
@@ -168,8 +172,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         s.onFinal = { [weak self] finalChunk in
             guard let self, !SettingsManager.shared.insertAfterStop else { return }
-            self.injectInterimDelta(fullTextSoFar: finalChunk)
+            self.injectInterimDelta(fullTextSoFar: finalChunk, isFinal: true)
             self.injectedWords = []
+            self.pendingInterim = ""
         }
         s.onError = { [weak self] message in
             AppLog.log("❌ Live stream error: \(message) — falling back to batch recognition")
@@ -208,8 +213,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Each injected piece carries a TRAILING space. A leading space can be
     /// swallowed by some apps' paste handling, while a trailing space inside
     /// the pasted string survives everywhere.
-    private func injectInterimDelta(fullTextSoFar: String) {
-        guard let result = InterimDelta.next(previous: injectedWords, fullTextSoFar: fullTextSoFar) else { return }
+    private func injectInterimDelta(fullTextSoFar: String, isFinal: Bool = false) {
+        pendingInterim = fullTextSoFar
+        let textToProcess = TextCleaner.prepare(fullTextSoFar, enabled: cleanCurrentRecording, isFinal: isFinal)
+        guard let result = InterimDelta.next(previous: injectedWords, fullTextSoFar: textToProcess) else { return }
 
         // Revision diagnostics: recognizer amended previously injected words.
         if let range = result.revisedRange {
@@ -268,12 +275,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func finishStreaming(fullText: String) {
         isProcessing = false
         AppLog.log("⏹ finishStreaming: text=\(fullText.isEmpty ? "<empty>" : "<\(fullText.count) chars>")")
-        if !fullText.isEmpty {
-            AppLog.log("✨ [Stream result]: \"\(fullText)\"")
-            addToHistory(text: fullText)
-            // In insertAfterStop mode, inject the full text once when stopping.
-            if SettingsManager.shared.insertAfterStop {
-                TextInjector.shared.inject(text: fullText)
+        let cleaned = TextCleaner.prepare(fullText, enabled: cleanCurrentRecording)
+        // A filler-only transcript is successful silence, not a failed recognizer.
+        if !fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if !SettingsManager.shared.insertAfterStop, !pendingInterim.isEmpty {
+                // Flush only the current segment; earlier final segments are already typed.
+                injectInterimDelta(fullTextSoFar: pendingInterim, isFinal: true)
+            }
+            pendingInterim = ""
+            if !cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                AppLog.log("✨ [Stream result]: \"\(cleaned)\"")
+                addToHistory(text: cleaned)
+                if SettingsManager.shared.insertAfterStop {
+                    TextInjector.shared.inject(text: cleaned)
+                }
             }
             _ = recorder.stop()
             updateStatusUI(state: "idle")
@@ -311,7 +326,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 switch result {
                 case .success(let text):
                     let elapsed = Date().timeIntervalSince(startTime)
-                    if !text.isEmpty {
+                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         AppLog.log("✨ [Transcribed (\(String(format: "%.2f", elapsed))s)]: \"\(text)\"")
                         self.addToHistory(text: text)
                         TextInjector.shared.inject(text: text)

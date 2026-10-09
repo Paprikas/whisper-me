@@ -20,11 +20,22 @@ final class TranscriptionService {
             return
         }
 
+        let cleanFillers = settings.cleanFillerWords
+        let wrappedCompletion: (Result<String, Error>) -> Void = { result in
+            switch result {
+            case .success(let text):
+                let cleaned = TextCleaner.prepare(text, enabled: cleanFillers)
+                completion(.success(cleaned))
+            case .failure(let error):
+                completion(.failure(error))
+            }
+        }
+
         switch provider {
         case .gemini:
-            gemini.transcribe(apiKey: apiKey, model: model, audioData: audioData, completion: completion)
+            gemini.transcribe(apiKey: apiKey, model: model, audioData: audioData, completion: wrappedCompletion)
         case .openrouter:
-            openRouter.transcribe(apiKey: apiKey, model: model, audioData: audioData, completion: completion)
+            openRouter.transcribe(apiKey: apiKey, model: model, audioData: audioData, completion: wrappedCompletion)
         }
     }
 }

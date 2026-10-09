@@ -168,6 +168,17 @@ class SettingsManager {
         }
     }
 
+    /// Automatically filters hesitations and filler sounds ("ээ", "мм", "а-а", "uh", "um").
+    var cleanFillerWords: Bool {
+        get {
+            if defaults.object(forKey: "clean_filler_words") == nil { return true }
+            return defaults.bool(forKey: "clean_filler_words")
+        }
+        set {
+            defaults.set(newValue, forKey: "clean_filler_words")
+        }
+    }
+
     /// Text insertion strategy:
     /// false = Real-time streaming (words stream as you speak),
     /// true  = After recording stops (entire text injected once).

@@ -45,6 +45,7 @@ struct TestRunner {
         testTranscriptionErrors()
         testHotKeyCombo()
         testAppLanguage()
+        testTextCleaner()
 
         print("\n\(passed) passed, \(failures.count) failed")
         if !failures.isEmpty {
@@ -370,5 +371,117 @@ struct TestRunner {
         let err = TranscriptionError.missingAPIKey(provider: .gemini)
         check("Error: ru text contains key reference", err.localizedDescription(isRussian: true).contains("API ключ"))
         check("Error: en text contains key reference", err.localizedDescription(isRussian: false).contains("API key"))
+    }
+
+    // MARK: - TextCleaner
+
+    static func testTextCleaner() {
+        checkEqual("TextCleaner: empty string", TextCleaner.clean(""), "")
+        checkEqual("TextCleaner: Russian comma-separated filler",
+                   TextCleaner.clean("Привет, э-э, как дела?"),
+                   "Привет, как дела?")
+        checkEqual("TextCleaner: Russian start of sentence",
+                   TextCleaner.clean("Э-э, добрый вечер!"),
+                   "Добрый вечер!")
+        checkEqual("TextCleaner: Russian informal",
+                   TextCleaner.clean("Ээ, всё норм!"),
+                   "Всё норм!")
+        checkEqual("TextCleaner: Russian 'что, мм, это'",
+                   TextCleaner.clean("Я думаю, что, мм, это правильно."),
+                   "Я думаю, что это правильно.")
+        checkEqual("TextCleaner: Russian modal verb filler",
+                   TextCleaner.clean("Мы должны, э-э, сделать релиз."),
+                   "Мы должны сделать релиз.")
+        checkEqual("TextCleaner: Russian list item preservation",
+                   TextCleaner.clean("Один, два, э-э, три."),
+                   "Один, два, три.")
+        checkEqual("TextCleaner: Russian list items with conjunction",
+                   TextCleaner.clean("Я купил яблоки, э-э, груши и бананы."),
+                   "Я купил яблоки, груши и бананы.")
+        checkEqual("TextCleaner: Russian trailing filler with ellipsis",
+                   TextCleaner.clean("Мы поехали, а-а..."),
+                   "Мы поехали...")
+        checkEqual("TextCleaner: Russian pure filler returns empty",
+                   TextCleaner.clean("Э-э"),
+                   "")
+        checkEqual("TextCleaner: Russian multiple consecutive fillers",
+                   TextCleaner.clean("А-а, ээ, ну да"),
+                   "Ну да")
+        checkEqual("TextCleaner: Russian taste/interjection 'м-м'",
+                   TextCleaner.clean("М-м, вкусно."),
+                   "Вкусно.")
+        checkEqual("TextCleaner: Russian 'хм'",
+                   TextCleaner.clean("хм, интересно!"),
+                   "Интересно!")
+        checkEqual("TextCleaner: Russian 'гм'",
+                   TextCleaner.clean("гм, ладно"),
+                   "Ладно")
+        checkEqual("TextCleaner: Russian without commas",
+                   TextCleaner.clean("Привет э-э мир"),
+                   "Привет мир")
+        checkEqual("TextCleaner: does not touch regular words with 'э' or 'а'",
+                   TextCleaner.clean("Это эта атака мама экран мэр поэзия"),
+                   "Это эта атака мама экран мэр поэзия")
+        checkEqual("TextCleaner: does not touch standalone conjunction 'а'",
+                   TextCleaner.clean("А вот это не удалять"),
+                   "А вот это не удалять")
+        checkEqual("TextCleaner: English leading filler",
+                   TextCleaner.clean("Um, hello world"),
+                   "Hello world")
+        checkEqual("TextCleaner: English mid-sentence filler",
+                   TextCleaner.clean("Hello, uh, world!"),
+                   "Hello, world!")
+
+        let unchanged = [
+            "ээлектроника, Аарон, эмма, мммодель, хммодуль, гамма, shimmer, number, summer",
+            "это, эмблема, мама, программа, схема, ээfoo, fooээ, _ээ_, э-элемент",
+            "iOS работает", "hello  world", "... продолжение", "\tимя\n\n  данные",
+            "А ну вот да угу", "Размер 10 мм, допуск 2,5 мм.", "Длина 10   мм.",
+            "Напиши «ээ», \"um\", 'uh', `мм` буквально.",
+            "Umberto, Uhura, hmm_value, x-um-y", "а-а-б, ааа123, м-м_значение"
+        ]
+        for text in unchanged {
+            checkEqual("TextCleaner: preserves \(text)", TextCleaner.clean(text), text)
+        }
+        let examples: [(String, String)] = [
+            ("Э-э, мм, а-а...", ""),
+            ("ээ, ээ, ээ, ээ, ээ, привет", "Привет"),
+            ("привет мм мир", "привет мир"),
+            ("Первая ээ строка\n\nВторая мм строка", "Первая строка\n\nВторая строка"),
+            ("🙂 ээ привет", "🙂 привет"),
+            ("Э—э, готово", "Готово"),
+            ("А–а, готово", "Готово"),
+            ("М-м-м, готово", "Готово"),
+            ("Ээ, iOS готов", "iOS готов")
+        ]
+        for (input, expected) in examples {
+            checkEqual("TextCleaner: regression \(input)", TextCleaner.clean(input), expected)
+            checkEqual("TextCleaner: idempotent \(input)", TextCleaner.clean(expected), expected)
+        }
+        checkEqual("TextCleaner: disabled keeps exact transcript",
+                   TextCleaner.prepare("ээ,  hello\n мм", enabled: false), "ээ,  hello\n мм")
+        checkEqual("TextCleaner: disabled keeps partial word",
+                   TextCleaner.prepare("э", enabled: false, isFinal: false), "э")
+        checkEqual("TextCleaner: holds incomplete token",
+                   TextCleaner.prepare("э", enabled: true, isFinal: false), "")
+        checkEqual("TextCleaner: real word becomes stable",
+                   TextCleaner.prepare("экран готов", enabled: true, isFinal: false), "экран ")
+        checkEqual("TextCleaner: final flushes last word",
+                   TextCleaner.prepare("экран", enabled: true), "экран")
+        checkEqual("TextCleaner: filler-only final empty",
+                   TextCleaner.prepare("ээ, мм...", enabled: true), "")
+        checkEqual("TextCleaner: unit in stable stream preserved",
+                   TextCleaner.prepare("10 мм готово", enabled: true, isFinal: false), "10 мм ")
+
+        var previous: [String] = []
+        var inserted = ""
+        for (text, final) in [("э", false), ("экран ээ", false), ("экран ээ готов", false), ("экран ээ готов", true)] {
+            let cleaned = TextCleaner.prepare(text, enabled: true, isFinal: final)
+            if let delta = InterimDelta.next(previous: previous, fullTextSoFar: cleaned) {
+                previous = delta.words
+                inserted += delta.delta
+            }
+        }
+        checkEqual("TextCleaner: streaming partial then final without loss or duplicates", inserted, "экран готов ")
     }
 }

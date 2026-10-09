@@ -17,6 +17,7 @@ Works everywhere across macOS: Terminal, Cursor, VS Code, Slack, Telegram, brows
 - **Pure Native Swift:** No Electron, no Python, no Node.js. Instant startup, minimal memory and CPU footprint.
 - **Universal Binary:** Single build supporting both Apple Silicon (arm64) and Intel (x86_64) on macOS 13 (Ventura) and later.
 - **Custom Technical Vocabulary:** Provide domain terms and names to enhance recognition accuracy (Gemini).
+- **Hesitation Filter:** Default-on local removal of isolated filler sounds ("ээ", "мм", "а-а", "um", "uh") with conservative punctuation repair, for both providers.
 - **Sound Signals & Autostart:** Subtle audio cues on record start/stop, optional launch at system login (`SMAppService`).
 
 ---
@@ -102,7 +103,16 @@ Click the menu bar icon 🎙️ → **Settings…**:
 - **Text Insertion Mode:** Real-time streaming (words inserted as you speak) or all-at-once after recording stops.
 - **Language:** Choose between System (Auto), English, or Russian.
 - **Vocabulary:** Enter specialized terminology or proper nouns (comma-separated).
+- **Filter:** Enable/disable automatic removal of filler words and hesitations ("ээ", "мм", "а-а", "um", "uh").
 - **Accessibility:** Ensure Accessibility permissions are granted so the app can insert text.
+
+The filter removes isolated sounds, not meaningful words such as Russian `а`, `ну`, or `вот`. It preserves ordinary words, directly quoted sound literals, numeric `мм` measurements and paragraph breaks. Disable it for verbatim dictation: text alone cannot always distinguish a hesitation from an intentional interjection.
+
+With filtering enabled, streaming holds the last incomplete token until another word or the final event arrives, so a partial `э` is not discarded before it becomes `экран`. Already inserted recognizer revisions still cannot be retracted; use **After recording stops** for the most consistent final text. A filler-only streaming result inserts nothing and does not trigger batch fallback.
+
+Gemini Flash batch requests also ask for clean transcription without paraphrasing. Gemini transcription/Live paths and OpenRouter use the local filter; OpenRouter's top-level `prompt` is [ignored](https://openrouter.ai/docs/guides/overview/multimodal/stt), so we do not send it. No second LLM call is added.
+
+For comparison, [Codex CLI v0.105.0 source](https://github.com/openai/codex/blob/rust-v0.105.0/codex-rs/tui/src/voice.rs) sends recorded WAV to `gpt-4o-transcribe` with API-key auth, or to ChatGPT's `/backend-api/transcribe` with ChatGPT auth. That client returns server text without a local filler-removal pass; this does not reveal the desktop app's implementation or the server's internal cleanup. [OpenAI's archived Whisper prompting guide](https://developers.openai.com/cookbook/examples/whisper_prompting_guide) explains that Whisper imitates prompt style rather than following imperative instructions, so a prompt alone is not a reliable removal guarantee.
 
 ### Environment Variables (`.env`)
 
