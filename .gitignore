@@ -1,0 +1,15 @@
+# Secrets / local config
+.env
+
+# Build artifacts
+build/
+dist/
+*.app
+whisper-me-bin
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
