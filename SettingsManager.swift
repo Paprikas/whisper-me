@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 extension Notification.Name {
     static let appLanguageDidChange = Notification.Name("WhisperMeAppLanguageDidChange")
@@ -54,19 +55,58 @@ class SettingsManager {
     /// API key for the currently active provider.
     var apiKey: String {
         get { apiKey(for: provider) }
-        set { setAPIKey(newValue, for: provider) }
+        set {
+            do { try setAPIKey(newValue, for: provider) }
+            catch { AppLog.log("Unable to save API key to Keychain: \(error.localizedDescription)") }
+        }
     }
 
-    /// Provider-specific API key: checked first in UserDefaults, then in .env.
+    private func keyQuery(_ provider: TranscriptionProvider) -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword,
+         kSecAttrService as String: "com.whisperme.app",
+         kSecAttrAccount as String: provider.apiKeyDefaultsKey]
+    }
+
+    /// Migrate legacy preferences only after a confirmed Keychain write.
     func apiKey(for provider: TranscriptionProvider) -> String {
-        if let fromDefaults = defaults.string(forKey: provider.apiKeyDefaultsKey), !fromDefaults.isEmpty {
-            return fromDefaults
+        var query = keyQuery(provider)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecSuccess, let data = result as? Data,
+           let key = String(data: data, encoding: .utf8) {
+            defaults.removeObject(forKey: provider.apiKeyDefaultsKey)
+            return key
         }
+        if status == errSecItemNotFound,
+           let legacy = defaults.string(forKey: provider.apiKeyDefaultsKey), !legacy.isEmpty {
+            do { try setAPIKey(legacy, for: provider) }
+            catch { AppLog.log("Keychain migration failed: \(error.localizedDescription)") }
+            return legacy
+        }
+        // Do not silently substitute another credential when Keychain is locked/denied.
+        guard status == errSecItemNotFound else { return "" }
         return Self.envValue(provider.apiKeyEnvName) ?? ""
     }
 
-    func setAPIKey(_ key: String, for provider: TranscriptionProvider) {
-        defaults.set(key, forKey: provider.apiKeyDefaultsKey)
+    func setAPIKey(_ key: String, for provider: TranscriptionProvider) throws {
+        let query = keyQuery(provider)
+        // Store an empty value explicitly, so clearing a key also overrides .env.
+        let data = Data(key.utf8)
+        var status = SecItemUpdate(query as CFDictionary,
+                                  [kSecValueData as String: data] as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = query
+            item[kSecValueData as String] = data
+            item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            status = SecItemAdd(item as CFDictionary, nil)
+        }
+        guard status == errSecSuccess else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status),
+                          userInfo: [NSLocalizedDescriptionKey: SecCopyErrorMessageString(status, nil) as String? ?? "Keychain error \(status)"])
+        }
+        defaults.removeObject(forKey: provider.apiKeyDefaultsKey)
     }
 
     /// Reads a variable from a .env file. Looks in the project root (next to Sources
@@ -168,15 +208,32 @@ class SettingsManager {
         }
     }
 
-    /// Automatically filters hesitations and filler sounds ("ээ", "мм", "а-а", "uh", "um").
-    var cleanFillerWords: Bool {
+    /// Selected mode for cleaning filler words and hesitations.
+    /// - smart: native API / model smart cleanup (default)
+    /// - manual: local regex deletion
+    /// - disabled: verbatim raw audio transcript
+    var cleaningMode: CleaningMode {
         get {
-            if defaults.object(forKey: "clean_filler_words") == nil { return true }
-            return defaults.bool(forKey: "clean_filler_words")
+            if let raw = defaults.string(forKey: "cleaning_mode"),
+               let mode = CleaningMode(rawValue: raw) {
+                return mode
+            }
+            // Backward compatibility with clean_filler_words bool
+            if defaults.object(forKey: "clean_filler_words") != nil {
+                return defaults.bool(forKey: "clean_filler_words") ? .smart : .disabled
+            }
+            return .smart
         }
         set {
-            defaults.set(newValue, forKey: "clean_filler_words")
+            defaults.set(newValue.rawValue, forKey: "cleaning_mode")
+            defaults.set(newValue != .disabled, forKey: "clean_filler_words")
         }
+    }
+
+    /// Backward compatibility flag. Returns true if cleaningMode is not disabled.
+    var cleanFillerWords: Bool {
+        get { cleaningMode != .disabled }
+        set { cleaningMode = newValue ? .smart : .disabled }
     }
 
     /// Text insertion strategy:

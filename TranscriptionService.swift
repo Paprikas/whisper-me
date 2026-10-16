@@ -20,11 +20,14 @@ final class TranscriptionService {
             return
         }
 
-        let cleanFillers = settings.cleanFillerWords
+        let cleaningMode = settings.cleaningMode
         let wrappedCompletion: (Result<String, Error>) -> Void = { result in
             switch result {
             case .success(let text):
-                let cleaned = TextCleaner.prepare(text, enabled: cleanFillers)
+                // If manual mode is selected, run local TextCleaner regex.
+                // In smart mode, cleaning was done natively by the model/API.
+                // In disabled mode, text is untouched.
+                let cleaned = TextCleaner.prepare(text, enabled: cleaningMode.usesManualCleaner)
                 completion(.success(cleaned))
             case .failure(let error):
                 completion(.failure(error))

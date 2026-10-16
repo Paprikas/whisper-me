@@ -282,7 +282,7 @@ final class ShortcutRecorderControl: NSView {
 }
 
 /// WhisperMe settings window controller (Auto Layout NSStackView).
-final class SettingsWindowController: NSWindowController {
+final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     static let shared = SettingsWindowController()
 
     /// Cache of OpenRouter models catalog to prevent frequent network refetches.
@@ -316,7 +316,7 @@ final class SettingsWindowController: NSWindowController {
     private var soundsCheck: NSButton!
 
     private var cleanFillerLabel: NSTextField!
-    private var cleanFillerCheck: NSButton!
+    private var cleanModePopup: NSPopUpButton!
 
     private var vocabLabel: NSTextField!
     private var vocabField: NSTextField!
@@ -334,6 +334,18 @@ final class SettingsWindowController: NSWindowController {
     private var saveButton: NSButton!
 
     private var initialLanguage: AppLanguage = .system
+    private var displayedProvider: TranscriptionProvider?
+    private var draftKeys: [TranscriptionProvider: APIKeyDraft] = [:]
+    private var draftModels: [TranscriptionProvider: String] = [:]
+    private var saved = false
+
+    private func captureProviderDraft() {
+        guard let provider = displayedProvider else { return }
+        draftKeys[provider]?.value = apiKeyField.stringValue
+        if modelOptions.indices.contains(modelPopup.indexOfSelectedItem) {
+            draftModels[provider] = modelOptions[modelPopup.indexOfSelectedItem].id
+        }
+    }
 
     /// Models shown in modelPopup for the selected provider.
     private var modelOptions: [ModelOption] = []
@@ -359,6 +371,7 @@ final class SettingsWindowController: NSWindowController {
         window.tabbingMode = .disallowed
         window.center()
         super.init(window: window)
+        window.delegate = self
         buildUI()
     }
 
@@ -455,9 +468,14 @@ final class SettingsWindowController: NSWindowController {
         let (soundsRow, sLabel) = labeledRow(L10n.tr("Звук:", "Sound:"), soundsCheck)
         soundsLabel = sLabel
 
-        cleanFillerCheck = NSButton(checkboxWithTitle: L10n.tr("Очищать слова-паразиты и мычание (ээ, мм, а-а)", "Filter filler words & hesitations (um, uh)"), target: nil, action: nil)
-        cleanFillerCheck.state = settings.cleanFillerWords ? .on : .off
-        let (cleanFillerRow, cfLabel) = labeledRow(L10n.tr("Фильтр:", "Filter:"), cleanFillerCheck)
+        cleanModePopup = NSPopUpButton()
+        for mode in CleaningMode.allCases {
+            cleanModePopup.addItem(withTitle: mode.title(for: settings.isRussian))
+        }
+        if let idx = CleaningMode.allCases.firstIndex(of: settings.cleaningMode) {
+            cleanModePopup.selectItem(at: idx)
+        }
+        let (cleanFillerRow, cfLabel) = labeledRow(L10n.tr("Очистка речи:", "Clean Speech:"), cleanModePopup)
         cleanFillerLabel = cfLabel
 
         // --- Словарь ---
@@ -526,6 +544,7 @@ final class SettingsWindowController: NSWindowController {
         apiKeyField.widthAnchor.constraint(equalTo: keyRow.widthAnchor, constant: -34).isActive = true
         vocabField.widthAnchor.constraint(equalToConstant: contentWidth - 130).isActive = true
         modelPopup.widthAnchor.constraint(equalToConstant: contentWidth - 130).isActive = true
+        cleanModePopup.widthAnchor.constraint(equalToConstant: contentWidth - 130).isActive = true
         hotkeyStack.widthAnchor.constraint(equalToConstant: contentWidth - 130).isActive = true
         resetHotkeyButton.setContentHuggingPriority(.required, for: .horizontal)
         hotkeyRecorder.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -652,8 +671,17 @@ final class SettingsWindowController: NSWindowController {
         soundsLabel.stringValue = L10n.tr("Звук:", "Sound:")
         soundsCheck.title = L10n.tr("Звуковые сигналы", "Sound effects")
 
-        cleanFillerLabel.stringValue = L10n.tr("Фильтр:", "Filter:")
-        cleanFillerCheck.title = L10n.tr("Очищать слова-паразиты и мычание (ээ, мм, а-а)", "Filter filler words & hesitations (um, uh)")
+        cleanFillerLabel.stringValue = L10n.tr("Очистка речи:", "Clean Speech:")
+        let currentCleanSel = cleanModePopup.indexOfSelectedItem
+        cleanModePopup.removeAllItems()
+        for mode in CleaningMode.allCases {
+            cleanModePopup.addItem(withTitle: mode.title(for: isRu))
+        }
+        if currentCleanSel >= 0 && currentCleanSel < CleaningMode.allCases.count {
+            cleanModePopup.selectItem(at: currentCleanSel)
+        } else if let idx = CleaningMode.allCases.firstIndex(of: SettingsManager.shared.cleaningMode) {
+            cleanModePopup.selectItem(at: idx)
+        }
 
         vocabLabel.stringValue = L10n.tr("Словарь:", "Vocabulary:")
         vocabField.placeholderString = L10n.tr("имена, термины — через запятую", "names, terms — comma-separated")
@@ -693,14 +721,20 @@ final class SettingsWindowController: NSWindowController {
 
     /// Reconfigures form fields for the selected provider.
     private func applyProvider(_ provider: TranscriptionProvider) {
+        window?.makeFirstResponder(nil)
+        captureProviderDraft()
+        displayedProvider = provider
         keyHeader.stringValue = L10n.tr("Ключ API — \(provider.title)", "API Key — \(provider.title)")
         apiKeyField.placeholderString = provider == .gemini
             ? L10n.tr("Вставьте ключ Google AI Studio", "Enter Google AI Studio key")
             : L10n.tr("Вставьте ключ OpenRouter (sk-or-…)", "Enter OpenRouter key (sk-or-…)")
-        apiKeyField.stringValue = SettingsManager.shared.apiKey(for: provider)
+        if draftKeys[provider] == nil {
+            draftKeys[provider] = APIKeyDraft(value: SettingsManager.shared.apiKey(for: provider))
+        }
+        apiKeyField.stringValue = draftKeys[provider]?.value ?? ""
         keyHint.stringValue = L10n.tr(
-            "Ключ хранится только на этом Mac (UserDefaults или \(provider.apiKeyEnvName) в .env).",
-            "Key is stored locally on this Mac (UserDefaults or \(provider.apiKeyEnvName) in .env)."
+            "Ключ хранится только на этом Mac (Keychain или \(provider.apiKeyEnvName) в .env).",
+            "Key is stored locally on this Mac (Keychain or \(provider.apiKeyEnvName) in .env)."
         )
 
         let streaming = provider.supportsStreaming
@@ -725,7 +759,7 @@ final class SettingsWindowController: NSWindowController {
     private func reloadModelList(for provider: TranscriptionProvider) {
         modelsRequestID += 1
         let requestID = modelsRequestID
-        let saved = SettingsManager.shared.model(for: provider)
+        let saved = draftModels[provider] ?? SettingsManager.shared.model(for: provider)
 
         switch provider {
         case .gemini:
@@ -736,10 +770,11 @@ final class SettingsWindowController: NSWindowController {
                 fillModelPopup(with: Self.openRouterModelCache, selecting: saved)
                 return
             }
+            modelOptions = []
             modelPopup.removeAllItems()
             modelPopup.addItem(withTitle: L10n.tr("Загрузка моделей…", "Loading models…"))
             modelPopup.isEnabled = false
-            OpenRouterTranscriber.fetchModels(apiKey: SettingsManager.shared.apiKey(for: provider)) { [weak self] result in
+            OpenRouterTranscriber.fetchModels(apiKey: draftKeys[provider]?.value ?? SettingsManager.shared.apiKey(for: provider)) { [weak self] result in
                 DispatchQueue.main.async {
                     guard let self = self, requestID == self.modelsRequestID else { return }
                     switch result {
@@ -756,26 +791,41 @@ final class SettingsWindowController: NSWindowController {
     }
 
     private func fillModelPopup(with options: [ModelOption], selecting modelID: String) {
-        modelOptions = options
+        var choices = options
+        if !modelID.isEmpty, !choices.contains(where: { $0.id == modelID }) {
+            choices.insert(ModelOption(id: modelID, title: modelID), at: 0)
+        }
+        modelOptions = choices
         modelPopup.removeAllItems()
-        for option in options { modelPopup.addItem(withTitle: option.title) }
-        if let index = options.firstIndex(where: { $0.id == modelID }) {
+        for option in choices { modelPopup.addItem(withTitle: option.title) }
+        if let index = choices.firstIndex(where: { $0.id == modelID }) {
             modelPopup.selectItem(at: index)
         }
-        modelPopup.isEnabled = !options.isEmpty
+        modelPopup.isEnabled = !choices.isEmpty
     }
 
     // MARK: - Actions
 
     @objc private func toggleKeyVisibility() {
+        window?.makeFirstResponder(nil)
+        let value = apiKeyField.stringValue
+        let font = apiKeyField.font
+        let placeholder = apiKeyField.placeholderString
         let willHide = !(apiKeyField.cell is NSSecureTextFieldCell)
         if willHide {
             apiKeyField.cell = NSSecureTextFieldCell(textCell: "")
         } else {
             apiKeyField.cell = NSTextFieldCell(textCell: "")
         }
-        revealButton.image = NSImage(systemSymbolName: willHide ? "eye.slash" : "eye",
-                                     accessibilityDescription: willHide ? "Hide API key" : "Show API key")
+        apiKeyField.stringValue = value
+        apiKeyField.font = font
+        apiKeyField.placeholderString = placeholder
+        apiKeyField.isEditable = true
+        apiKeyField.isSelectable = true
+        apiKeyField.isBezeled = true
+        apiKeyField.drawsBackground = true
+        revealButton.image = NSImage(systemSymbolName: willHide ? "eye" : "eye.slash",
+                                     accessibilityDescription: willHide ? "Show API key" : "Hide API key")
     }
 
     @objc private func openKeyPage() {
@@ -788,11 +838,44 @@ final class SettingsWindowController: NSWindowController {
     }
 
     override func showWindow(_ sender: Any?) {
-        initialLanguage = SettingsManager.shared.language
-        hotkeyRecorder?.cancelRecording()
-        hotkeyRecorder?.combo = SettingsManager.shared.hotkeyCombo
-        updateLocalizedTexts()
+        if window?.isVisible != true {
+            let settings = SettingsManager.shared
+            saved = false
+            initialLanguage = settings.language
+            draftKeys.removeAll()
+            draftModels.removeAll()
+            displayedProvider = nil
+            modelsRequestID += 1
+            providerPopup.selectItem(at: TranscriptionProvider.allCases.firstIndex(of: settings.provider) ?? 0)
+            apiKeyField.cell = NSSecureTextFieldCell(textCell: "")
+            apiKeyField.font = .monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+            apiKeyField.isEditable = true
+            apiKeyField.isSelectable = true
+            revealButton.image = NSImage(systemSymbolName: "eye", accessibilityDescription: "Show API key")
+            applyProvider(settings.provider)
+            hotkeyRecorder?.cancelRecording()
+            hotkeyRecorder?.combo = settings.hotkeyCombo
+            insertModePopup.selectItem(at: settings.insertAfterStop ? 1 : 0)
+            soundsCheck.state = settings.playSounds ? .on : .off
+            cleanModePopup.selectItem(at: CleaningMode.allCases.firstIndex(of: settings.cleaningMode) ?? 0)
+            vocabField.stringValue = settings.customVocab
+            languagePopup.selectItem(at: AppLanguage.allCases.firstIndex(of: settings.language) ?? 0)
+            launchAtLoginCheck.state = SMAppService.mainApp.status == .enabled ? .on : .off
+            updateLocalizedTexts()
+        }
         super.showWindow(sender)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        modelsRequestID += 1
+        hotkeyRecorder.cancelRecording()
+        if !saved, SettingsManager.shared.language != initialLanguage {
+            SettingsManager.shared.language = initialLanguage
+        }
+        draftKeys.removeAll()
+        draftModels.removeAll()
+        displayedProvider = nil
+        apiKeyField.stringValue = ""
     }
 
     @objc private func resetHotkeyToDefault() {
@@ -801,37 +884,46 @@ final class SettingsWindowController: NSWindowController {
     }
 
     @objc private func toggleLaunchAtLogin() {
-        let enabled = launchAtLoginCheck.state == .on
-        SettingsManager.shared.launchAtLogin = enabled
-        do {
-            if enabled {
-                try SMAppService.mainApp.register()
-            } else {
-                try SMAppService.mainApp.unregister()
-            }
-        } catch {
-            launchAtLoginCheck.state = .off
-            SettingsManager.shared.launchAtLogin = false
-        }
+        // Applied on Save, just like the other controls.
     }
 
     @objc private func saveClicked() {
         let settings = SettingsManager.shared
         let provider = selectedProvider
 
-        settings.provider = provider
-        settings.setAPIKey(apiKeyField.stringValue.trimmingCharacters(in: .whitespaces), for: provider)
-        if modelOptions.indices.contains(modelPopup.indexOfSelectedItem) {
-            settings.setModel(modelOptions[modelPopup.indexOfSelectedItem].id, for: provider)
+        window?.makeFirstResponder(nil)
+        captureProviderDraft()
+        do {
+            for (provider, draft) in draftKeys {
+                if let key = draft.valueToSave { try settings.setAPIKey(key, for: provider) }
+            }
+            let enabled = launchAtLoginCheck.state == .on
+            if enabled != (SMAppService.mainApp.status == .enabled) {
+                if enabled { try SMAppService.mainApp.register() }
+                else { try SMAppService.mainApp.unregister() }
+            }
+            settings.launchAtLogin = enabled
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = L10n.tr("Не удалось сохранить настройки", "Unable to save settings")
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+            return
         }
+        settings.provider = provider
+        for (provider, model) in draftModels { settings.setModel(model, for: provider) }
         settings.hotkeyCombo = hotkeyRecorder.combo
         if provider.supportsStreaming {
             settings.insertAfterStop = insertModePopup.indexOfSelectedItem == 1
         }
         settings.playSounds = soundsCheck.state == .on
-        settings.cleanFillerWords = cleanFillerCheck.state == .on
+        let cleanIdx = cleanModePopup.indexOfSelectedItem
+        if cleanIdx >= 0 && cleanIdx < CleaningMode.allCases.count {
+            settings.cleaningMode = CleaningMode.allCases[cleanIdx]
+        }
         settings.customVocab = vocabField.stringValue.trimmingCharacters(in: .whitespaces)
         HotKeyManager.shared.registerCurrent()
+        saved = true
         window?.close()
     }
 

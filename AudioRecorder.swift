@@ -4,7 +4,7 @@ import AVFAudio
 
 class AudioRecorder: NSObject, AVAudioRecorderDelegate {
     private var audioRecorder: AVAudioRecorder?
-    private var recordedData = Data()
+    private var recordingURL: URL?
 
     func requestMicrophoneAccess(completion: @escaping (Bool) -> Void) {
         AVCaptureDevice.requestAccess(for: .audio) { granted in
@@ -12,8 +12,8 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
         }
     }
 
-    func start() {
-        recordedData = Data()
+    func start() -> Bool {
+        _ = stop()
 
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
@@ -24,24 +24,29 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
             AVLinearPCMIsBigEndianKey: false
         ]
 
-        // Use a temporary file that AVAudioRecorder appends into; simpler: memory buffer via delegate
-        let tmpURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("whisper-me-recording.wav")
+        let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent("whisper-me-\(UUID().uuidString).wav")
+        recordingURL = tmpURL
 
         do {
             audioRecorder = try AVAudioRecorder(url: tmpURL, settings: settings)
             audioRecorder?.delegate = self
-            audioRecorder?.record()
+            guard audioRecorder?.record() == true else {
+                _ = stop()
+                return false
+            }
+            return true
         } catch {
-            print("❌ Failed to start recording: \(error.localizedDescription)")
+            AppLog.log("❌ Failed to start recording: \(error.localizedDescription)")
+            _ = stop()
+            return false
         }
     }
 
     func stop() -> Data? {
-        guard let recorder = audioRecorder, recorder.isRecording else { return nil }
-        recorder.stop()
+        audioRecorder?.stop()
         audioRecorder = nil
-
-        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("whisper-me-recording.wav")
+        guard let url = recordingURL else { return nil }
+        recordingURL = nil
         let data = try? Data(contentsOf: url)
         try? FileManager.default.removeItem(at: url)
         return data

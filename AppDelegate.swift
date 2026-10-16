@@ -28,6 +28,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var injectedWords: [String] = []
     private var pendingInterim = ""
     private var cleanCurrentRecording = true
+    private var insertAfterStop = true
+    private var hasStreamedText = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
@@ -145,14 +147,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Concurrently record audio to file for fallback if streaming drops.
-        recorder.start()
+        guard recorder.start() else {
+            showNotification(title: "WhisperMe", body: L10n.tr("Не удалось начать запись — проверьте микрофон", "Unable to start recording — check microphone"))
+            return
+        }
 
         isRecording = true
         isProcessing = false
         isBatchRunning = false
         injectedWords = []
         pendingInterim = ""
-        cleanCurrentRecording = SettingsManager.shared.cleanFillerWords
+        cleanCurrentRecording = SettingsManager.shared.cleaningMode.usesManualCleaner
+        insertAfterStop = SettingsManager.shared.insertAfterStop
+        hasStreamedText = false
 
         if SettingsManager.shared.playSounds {
             NSSound(named: "Tink")?.play()
@@ -167,11 +174,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let s = StreamingTranscriber(apiKey: apiKey, model: streamModel)
         s.onInterim = { [weak self] fullTextSoFar in
-            guard let self, !SettingsManager.shared.insertAfterStop else { return }
+            guard let self, !self.insertAfterStop else { return }
             self.injectInterimDelta(fullTextSoFar: fullTextSoFar)
         }
         s.onFinal = { [weak self] finalChunk in
-            guard let self, !SettingsManager.shared.insertAfterStop else { return }
+            guard let self, !self.insertAfterStop else { return }
             self.injectInterimDelta(fullTextSoFar: finalChunk, isFinal: true)
             self.injectedWords = []
             self.pendingInterim = ""
@@ -195,6 +202,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func fallbackToBatch() {
         isRecording = false
         isProcessing = true
+        streamer?.cancel()
         streamer = nil
         injectedWords = []
         updateStatusUI(state: "transcribing")
@@ -225,9 +233,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         injectedWords = result.words
         let delta = result.delta
-        DispatchQueue.main.async {
-            TextInjector.shared.injectTextAppending(delta)
-        }
+        hasStreamedText = true
+        TextInjector.shared.injectTextAppending(delta)
     }
 
     private func stopStreaming() {
@@ -257,8 +264,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self = self, !finished else { return }
             finished = true
             AppLog.log("⏱ watchdog: stop() completion timeout after 4s — emergency batch fallback")
-            self.isProcessing = false
-            self.finishStreaming(fullText: streamer.text)
+            streamer.cancel()
+            self.fallbackToBatch()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.0, execute: watchdog)
 
@@ -267,7 +274,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 guard !finished else { return }
                 finished = true
                 watchdog.cancel()
-                self?.finishStreaming(fullText: fullText)
+                if streamer.didFail { self?.fallbackToBatch() }
+                else { self?.finishStreaming(fullText: fullText) }
             }
         }
     }
@@ -278,7 +286,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let cleaned = TextCleaner.prepare(fullText, enabled: cleanCurrentRecording)
         // A filler-only transcript is successful silence, not a failed recognizer.
         if !fullText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if !SettingsManager.shared.insertAfterStop, !pendingInterim.isEmpty {
+            if !self.insertAfterStop, !pendingInterim.isEmpty {
                 // Flush only the current segment; earlier final segments are already typed.
                 injectInterimDelta(fullTextSoFar: pendingInterim, isFinal: true)
             }
@@ -286,7 +294,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if !cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 AppLog.log("✨ [Stream result]: \"\(cleaned)\"")
                 addToHistory(text: cleaned)
-                if SettingsManager.shared.insertAfterStop {
+                if self.insertAfterStop {
                     TextInjector.shared.inject(text: cleaned)
                 }
             }
@@ -314,6 +322,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         isBatchRunning = true
+        isProcessing = true
+        // Full batch recognition may revise the streamed prefix. Never append the
+        // complete WAV transcript over words already sent to the target app.
+        let recoverInHistoryOnly = hasStreamedText
 
         let startTime = Date()
         TranscriptionService.shared.transcribe(audioData: audioData) { [weak self] result in
@@ -329,7 +341,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         AppLog.log("✨ [Transcribed (\(String(format: "%.2f", elapsed))s)]: \"\(text)\"")
                         self.addToHistory(text: text)
-                        TextInjector.shared.inject(text: text)
+                        if recoverInHistoryOnly {
+                            self.showNotification(title: "WhisperMe", body: L10n.tr("Соединение прервано. Полный текст сохранён в Истории; повторная вставка отменена.", "Connection interrupted. Full text saved in History; duplicate insertion skipped."))
+                        } else {
+                            TextInjector.shared.inject(text: text)
+                        }
                     } else {
                         AppLog.log("⚠️ No speech detected.")
                         self.showNotification(title: "WhisperMe", body: L10n.tr("Речь не обнаружена", "No speech detected"))

@@ -1,125 +1,127 @@
 import Cocoa
 import ApplicationServices
 
-/// Text insertion at cursor — two-tier strategy:
-///
-///   Tier 1: Accessibility — direct assignment of kAXSelectedTextAttribute on
-///           the focused UI element. Bypasses pasteboard, inserts byte-for-byte
-///           without losing spaces or racing pasteboard listeners.
-///           Read-back verification is required since some apps report success without inserting.
-///   Tier 2: Synthesized Cmd+V via pasteboard — universal fallback
-///           (for terminal emulators and non-AX editable apps).
-class TextInjector {
+/// Serializes insertion jobs so two streaming chunks cannot share a clipboard.
+final class TextInjector {
     static let shared = TextInjector()
-
-    /// Terminal apps: lack editable AX text element — fall back to paste directly.
+    private struct Job { let text: String; let pid: pid_t }
+    private var jobs: [Job] = []
+    private var busy = false
+    private let axQueue = DispatchQueue(label: "com.whisperme.accessibility")
     private static let forcePasteBundles: Set<String> = [
-        "com.apple.Terminal",
-        "com.googlecode.iterm2",
-        "dev.warp.Warp-Stable",
-        "com.github.wez.wezterm",
-        "com.mitchellh.ghostty",
-        "net.kovidgoyal.kitty",
-        "io.alacritty",
+        "com.apple.Terminal", "com.googlecode.iterm2", "dev.warp.Warp-Stable",
+        "com.github.wez.wezterm", "com.mitchellh.ghostty", "net.kovidgoyal.kitty", "io.alacritty"
     ]
 
     func inject(text: String) {
-        guard !text.isEmpty else { return }
-        if insertViaAX(text, verify: true) { return }
-        pasteViaKeyboard(text)
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard !text.isEmpty, let app = NSWorkspace.shared.frontmostApplication else { return }
+        jobs.append(Job(text: text, pid: app.processIdentifier))
+        drain()
     }
 
-    /// Appends text at the cursor (used by streaming mode — called every few words).
-    func injectTextAppending(_ text: String) {
-        guard !text.isEmpty else { return }
-        if insertViaAX(text, verify: true) { return }
-        pasteViaKeyboard(text)
+    func injectTextAppending(_ text: String) { inject(text: text) }
+
+    private func drain() {
+        guard !busy, !jobs.isEmpty else { return }
+        busy = true
+        let job = jobs.removeFirst()
+        guard isTarget(job) else { finish(); return }
+        let forcePaste = Self.forcePasteBundles.contains(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "")
+        axQueue.async {
+            let result = self.insertViaAX(job.text, pid: job.pid, forcePaste: forcePaste)
+            DispatchQueue.main.async {
+                switch result {
+                case .inserted, .blocked: self.finish()
+                case .paste:
+                    guard self.isTarget(job) else { self.finish(); return }
+                    self.paste(job)
+                }
+            }
+        }
     }
 
-    // MARK: - Tier 1: Accessibility
+    private func isTarget(_ job: Job) -> Bool {
+        NSWorkspace.shared.frontmostApplication?.processIdentifier == job.pid
+    }
 
-    /// Direct AX insertion with read-back verification. Returns false if the element
-    /// does not support AX insertion (or value was unchanged) — falls back to paste.
-    private func insertViaAX(_ text: String, verify: Bool) -> Bool {
-        if let bundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
-           Self.forcePasteBundles.contains(bundle) {
-            return false
+    enum AXResult: Equatable { case inserted, paste, blocked }
+
+    /// A timed-out IPC may already have applied the write. Never paste twice.
+    static func resultOfAXWrite(_ status: AXError) -> AXResult {
+        switch status {
+        case .success: return .inserted
+        case .cannotComplete: return .blocked
+        default: return .paste
         }
+    }
 
-        let system = AXUIElementCreateSystemWide()
-        // Prevent unresponsive target apps from blocking the thread: 1.5s timeout.
-        AXUIElementSetMessagingTimeout(system, 1.5)
-
-        var focusedRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
-              let focused = focusedRef, CFGetTypeID(focused) == AXUIElementGetTypeID() else {
-            return false
+    /// Run AX IPC off the UI/audio threads. Secure fields block BOTH tiers.
+    private func insertViaAX(_ text: String, pid: pid_t, forcePaste: Bool) -> AXResult {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.25)
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &ref) == .success,
+              let ref, CFGetTypeID(ref) == AXUIElementGetTypeID() else { return .paste }
+        let element = unsafeDowncast(ref as AnyObject, to: AXUIElement.self)
+        AXUIElementSetMessagingTimeout(element, 0.25)
+        for attribute in [kAXRoleAttribute, kAXSubroleAttribute] {
+            var value: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+               value as? String == "AXSecureTextField" { return .blocked }
         }
-        let element = unsafeDowncast(focused as AnyObject, to: AXUIElement.self)
-
-        // Never inject text into secure password fields.
-        var roleRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef) == .success,
-           (roleRef as? String) == "AXSecureTextField" {
-            return false
-        }
-
+        guard !forcePaste else { return .paste }
         var settable = DarwinBoolean(false)
         AXUIElementIsAttributeSettable(element, kAXSelectedTextAttribute as CFString, &settable)
-        guard settable.boolValue else { return false }
+        guard settable.boolValue else { return .paste }
+        let status = AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef)
+        // Read-back can lag a successful write; it is not safe evidence for retry.
+        return Self.resultOfAXWrite(status)
+    }
 
-        let before = verify ? stringValue(of: element) : nil
-        guard AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef) == .success else {
-            return false
-        }
-
-        // Read-back verification: some apps report success without updating the field.
-        if verify, let before = before {
-            var landed = false
-            for _ in 0..<3 {
-                if let after = stringValue(of: element), after != before {
-                    landed = true
-                    break
-                }
-                Thread.sleep(forTimeInterval: 0.04)
+    private func paste(_ job: Job) {
+        let board = NSPasteboard.general
+        let saved: [NSPasteboardItem] = (board.pasteboardItems ?? []).map { item in
+            let copy = NSPasteboardItem()
+            for type in item.types {
+                if let data = item.data(forType: type) { copy.setData(data, forType: type) }
             }
-            if !landed { return false }
+            return copy
         }
-        return true
-    }
-
-    private func stringValue(of element: AXUIElement) -> String? {
-        var valueRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success else {
-            return nil
-        }
-        return valueRef as? String
-    }
-
-    // MARK: - Tier 2: pasteboard + Cmd+V
-
-    private func pasteViaKeyboard(_ text: String) {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
-
-        // Small delay to let system register clipboard content
+        board.clearContents()
+        board.setString(job.text, forType: .string)
+        let change = board.changeCount
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            guard self.isTarget(job), board.changeCount == change else {
+                self.restore(saved, ifUnchanged: change)
+                self.finish()
+                return
+            }
             self.simulatePaste()
+            // Allow target to consume Cmd+V before restoring or starting next job.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                self.restore(saved, ifUnchanged: change)
+                self.finish()
+            }
         }
     }
+
+    private func restore(_ items: [NSPasteboardItem], ifUnchanged count: Int) {
+        let board = NSPasteboard.general
+        guard board.changeCount == count else { return } // preserve a newer user copy
+        board.clearContents()
+        if !items.isEmpty { board.writeObjects(items) }
+    }
+
+    private func finish() { busy = false; drain() }
 
     private func simulatePaste() {
-        // Single paste event: CGEvent Cmd+V (requires Accessibility permission).
-        // NOTE: previously an AppleScript fallback ran here too, causing double paste.
-        let src = CGEventSource(stateID: .hidSystemState)
-        let keyDown = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: true) // 9 = 'V'
-        let keyUp = CGEvent(keyboardEventSource: src, virtualKey: 9, keyDown: false)
-
-        keyDown?.flags = .maskCommand
-        keyUp?.flags = .maskCommand
-
-        keyDown?.post(tap: .cghidEventTap)
-        keyUp?.post(tap: .cghidEventTap)
+        let source = CGEventSource(stateID: .hidSystemState)
+        let down = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true)
+        let up = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false)
+        down?.flags = .maskCommand
+        up?.flags = .maskCommand
+        down?.post(tap: .cghidEventTap)
+        up?.post(tap: .cghidEventTap)
     }
 }

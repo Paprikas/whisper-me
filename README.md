@@ -17,7 +17,7 @@ Works everywhere across macOS: Terminal, Cursor, VS Code, Slack, Telegram, brows
 - **Pure Native Swift:** No Electron, no Python, no Node.js. Instant startup, minimal memory and CPU footprint.
 - **Universal Binary:** Single build supporting both Apple Silicon (arm64) and Intel (x86_64) on macOS 13 (Ventura) and later.
 - **Custom Technical Vocabulary:** Provide domain terms and names to enhance recognition accuracy (Gemini).
-- **Hesitation Filter:** Default-on local removal of isolated filler sounds ("ээ", "мм", "а-а", "um", "uh") with conservative punctuation repair, for both providers.
+- **Speech Cleanup:** Smart model/API cleanup by default, with optional conservative local filtering of isolated hesitation sounds or verbatim recognition.
 - **Sound Signals & Autostart:** Subtle audio cues on record start/stop, optional launch at system login (`SMAppService`).
 
 ---
@@ -97,20 +97,27 @@ This clears the `com.apple.quarantine` extended attribute set by macOS during do
 Click the menu bar icon 🎙️ → **Settings…**:
 
 - **Provider:** Switch between Gemini and OpenRouter. Keys and models are isolated per provider.
-- **API Key:** Enter your key securely in the UI or set it in `.env` (see below).
+- **API Key:** UI keys are stored in macOS Keychain, not preferences. Existing preference keys migrate only after a successful Keychain write. Alternatively use `.env` (see below); only edited keys are saved, and explicitly deleting an existing key overrides `.env`. Saving unrelated settings does not create an empty-key override.
 - **Model:** Select recognition model (built-in for Gemini, dynamically fetched for OpenRouter).
 - **Hotkey:** Click the shortcut box and press your preferred keys (e.g. `⌥Space` or `⌘⇧D`).
 - **Text Insertion Mode:** Real-time streaming (words inserted as you speak) or all-at-once after recording stops.
 - **Language:** Choose between System (Auto), English, or Russian.
 - **Vocabulary:** Enter specialized terminology or proper nouns (comma-separated).
-- **Filter:** Enable/disable automatic removal of filler words and hesitations ("ээ", "мм", "а-а", "um", "uh").
+- **Clean Speech:** Select speech cleanup mode:
+  - **Smart Mode (Model / API):** Recommended default. Uses native model capabilities (Gemini `SMART` transcription mode in Live and Interactions API, prompt instructions in Flash, and forwarded `provider.options` in OpenRouter for Google, OpenAI, Groq).
+  - **Manual Filter (Regex):** Post-processing regex filter removing isolated hesitation sounds ("ээ", "мм", "а-а", "um", "uh") with punctuation and casing repair.
+  - **Disabled (Verbatim):** Verbatim recognition preserving all spoken sounds and disfluencies.
 - **Accessibility:** Ensure Accessibility permissions are granted so the app can insert text.
 
-The filter removes isolated sounds, not meaningful words such as Russian `а`, `ну`, or `вот`. It preserves ordinary words, directly quoted sound literals, numeric `мм` measurements and paragraph breaks. Disable it for verbatim dictation: text alone cannot always distinguish a hesitation from an intentional interjection.
+Provider-specific key/model drafts survive switching providers. Save applies them; Cancel or closing the window discards edits (including the language preview and launch-at-login checkbox).
 
-With filtering enabled, streaming holds the last incomplete token until another word or the final event arrives, so a partial `э` is not discarded before it becomes `экран`. Already inserted recognizer revisions still cannot be retracted; use **After recording stops** for the most consistent final text. A filler-only streaming result inserts nothing and does not trigger batch fallback.
+On Live connection failure the complete backup WAV is transcribed instead of reconnecting across a gap. If streaming text has already been submitted for insertion, the recovered full text is saved to History without inserting it again. Otherwise it is inserted normally. Insertion jobs are serialized; a successful or ambiguous/timed-out AX write is never retried with Cmd+V. Clipboard fallback restores prior contents only if the clipboard has not since changed. Known secure text fields are excluded from both AX and clipboard insertion.
 
-Gemini Flash batch requests also ask for clean transcription without paraphrasing. Gemini transcription/Live paths and OpenRouter use the local filter; OpenRouter's top-level `prompt` is [ignored](https://openrouter.ai/docs/guides/overview/multimodal/stt), so we do not send it. No second LLM call is added.
+The manual filter removes isolated sounds, not meaningful words such as Russian `а`, `ну`, or `вот`. It preserves ordinary words, directly quoted sound literals, numeric `мм` measurements and paragraph breaks.
+
+In manual mode with streaming, the app holds the last incomplete token until another word or the final event arrives, so a partial `э` is not discarded before it becomes `экран`. In Smart mode, the model itself performs disfluency removal and smart formatting upstream without crude regular expression replacements.
+
+For OpenRouter, provider-specific options (`transcription_config` for Google AI Studio, `prompt` for OpenAI/Groq) are forwarded via `provider.options` according to OpenRouter STT documentation. No second LLM call is added.
 
 For comparison, [Codex CLI v0.105.0 source](https://github.com/openai/codex/blob/rust-v0.105.0/codex-rs/tui/src/voice.rs) sends recorded WAV to `gpt-4o-transcribe` with API-key auth, or to ChatGPT's `/backend-api/transcribe` with ChatGPT auth. That client returns server text without a local filler-removal pass; this does not reveal the desktop app's implementation or the server's internal cleanup. [OpenAI's archived Whisper prompting guide](https://developers.openai.com/cookbook/examples/whisper_prompting_guide) explains that Whisper imitates prompt style rather than following imperative instructions, so a prompt alone is not a reliable removal guarantee.
 
@@ -148,13 +155,15 @@ OPENROUTER_API_KEY=sk-or-your_openrouter_key
 
 ## 🧪 Tests
 
-Unit tests verify pure domain logic (`Logic.swift`) without requiring network or AppKit:
+The runner checks pure domain logic, Gemini HTTP handling with a stubbed `URLProtocol`, and Live lifecycle behavior with an in-memory WebSocket. No microphone, API credentials or real network requests are needed:
 
 ```bash
 ./tests/run.sh
 ```
 
-Tests cover Live API WebSocket URL construction, delta text generation, transcript segment management, hotkey formatting, validation, language resolution, and OpenRouter payload/response parsing.
+Tests cover Live API WebSocket URL construction, delta text generation, transcript segment management, hotkey formatting, validation, language resolution, OpenRouter payload/response parsing, Gemini HTTP/transport errors, malformed responses, multipart text, auth headers, model fallback, credential draft persistence, AX retry decisions, Live stop without `turnComplete`, coalescing final segments, incomplete-final timeout recovery, audio-drain ordering, stale callbacks after restart, and failed-start cleanup.
+
+Manual checks still required with macOS permissions and real providers: microphone start failure, Live stop/final timing and disconnection recovery, rapid streaming insertion in AX editors and terminals, clipboard preservation, secure fields, Keychain migration/denied access, and Settings Save/Cancel/close.
 
 ---
 

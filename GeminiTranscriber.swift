@@ -4,6 +4,9 @@ import Foundation
 /// the Interactions API; flash models use generateContent with custom vocabulary support.
 final class GeminiTranscriber {
     private let fallbackModels = ["gemini-3.1-flash-lite"]
+    private let session: URLSession
+
+    init(session: URLSession = .shared) { self.session = session }
 
     func transcribe(apiKey: String, model: String, audioData: Data, completion: @escaping (Result<String, Error>) -> Void) {
         guard !apiKey.isEmpty else {
@@ -52,7 +55,7 @@ final class GeminiTranscriber {
         request.addValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
         request.timeoutInterval = 25.0
 
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "model": model,
             "input": [
                 [
@@ -63,6 +66,14 @@ final class GeminiTranscriber {
             ]
         ]
 
+        if SettingsManager.shared.cleaningMode.usesNativeCleanup {
+            payload["generation_config"] = [
+                "transcription_config": [
+                    "mode": "smart"
+                ]
+            ]
+        }
+
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: payload)
         } catch {
@@ -70,9 +81,16 @@ final class GeminiTranscriber {
             return
         }
 
-        URLSession(configuration: .default).dataTask(with: request) { data, _, error in
+        session.dataTask(with: request) { data, response, error in
             if let error = error {
                 completion(.failure(error))
+                return
+            }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard (200..<300).contains(status) else {
+                let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                let message = (json?["error"] as? [String: Any])?["message"] as? String
+                completion(.failure(TranscriptionError.http(status: status, message: message)))
                 return
             }
             guard let data = data else {
@@ -80,26 +98,22 @@ final class GeminiTranscriber {
                 return
             }
             do {
-                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
-                        completion(.failure(NSError(domain: "WhisperMe", code: 500, userInfo: [NSLocalizedDescriptionKey: msg])))
-                        return
-                    }
-                    // Parse steps[].content[].text
-                    if let steps = json["steps"] as? [[String: Any]] {
-                        for step in steps {
-                            if let contentArr = step["content"] as? [[String: Any]] {
-                                for item in contentArr {
-                                    if let text = item["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                        completion(.success(text.trimmingCharacters(in: .whitespacesAndNewlines)))
-                                        return
-                                    }
-                                }
-                            }
-                        }
-                    }
+                guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    completion(.failure(TranscriptionError.invalidResponse))
+                    return
                 }
-                completion(.success(""))
+                if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
+                    completion(.failure(NSError(domain: "WhisperMe", code: 500, userInfo: [NSLocalizedDescriptionKey: msg])))
+                    return
+                }
+                // Parse steps[].content[].text
+                guard let steps = json["steps"] as? [[String: Any]] else {
+                    completion(.failure(TranscriptionError.invalidResponse))
+                    return
+                }
+                let texts = steps.flatMap { $0["content"] as? [[String: Any]] ?? [] }
+                    .compactMap { $0["text"] as? String }
+                completion(.success(texts.joined().trimmingCharacters(in: .whitespacesAndNewlines)))
             } catch {
                 completion(.failure(error))
             }
@@ -138,7 +152,7 @@ final class GeminiTranscriber {
     }
 
     private func callGenerateContent(model: String, base64Audio: String, apiKey: String, completion: @escaping (Result<String, Error>) -> Void) {
-        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent?key=\(apiKey)") else {
+        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent") else {
             completion(.failure(NSError(domain: "WhisperMe", code: 400, userInfo: [NSLocalizedDescriptionKey: "Bad URL"])))
             return
         }
@@ -146,10 +160,11 @@ final class GeminiTranscriber {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.addValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
         request.timeoutInterval = 25.0
 
         let vocab = SettingsManager.shared.customVocab
-        let clean = SettingsManager.shared.cleanFillerWords
+        let clean = SettingsManager.shared.cleaningMode.usesNativeCleanup
         let baseInstruction = clean
             ? "Transcribe the audio accurately into clean text. Omit non-lexical hesitation sounds (such as 'ээ', 'мм', 'а-а', 'um', 'uh'). Preserve the meaning, ordinary words, names, numbers, and deliberately quoted sounds. Do not summarize or paraphrase. "
             : "Transcribe the audio verbatim. "
@@ -177,9 +192,16 @@ final class GeminiTranscriber {
             return
         }
 
-        URLSession(configuration: .default).dataTask(with: request) { data, _, error in
+        session.dataTask(with: request) { data, response, error in
             if let error = error {
                 completion(.failure(error))
+                return
+            }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard (200..<300).contains(status) else {
+                let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                let message = (json?["error"] as? [String: Any])?["message"] as? String
+                completion(.failure(TranscriptionError.http(status: status, message: message)))
                 return
             }
             guard let data = data else {
@@ -187,23 +209,29 @@ final class GeminiTranscriber {
                 return
             }
             do {
-                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
-                        completion(.failure(NSError(domain: "WhisperMe", code: 500, userInfo: [NSLocalizedDescriptionKey: msg])))
-                        return
-                    }
-                    if let candidates = json["candidates"] as? [[String: Any]],
-                       let content = candidates.first?["content"] as? [String: Any],
-                       let parts = content["parts"] as? [[String: Any]] {
-                        for part in parts {
-                            if let text = part["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                completion(.success(text.trimmingCharacters(in: .whitespacesAndNewlines)))
-                                return
-                            }
-                        }
-                    }
+                guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    completion(.failure(TranscriptionError.invalidResponse))
+                    return
                 }
-                completion(.success(""))
+                if let errorObj = json["error"] as? [String: Any], let msg = errorObj["message"] as? String {
+                    completion(.failure(NSError(domain: "WhisperMe", code: 500, userInfo: [NSLocalizedDescriptionKey: msg])))
+                    return
+                }
+                guard let candidates = json["candidates"] as? [[String: Any]] else {
+                    completion(.failure(TranscriptionError.invalidResponse))
+                    return
+                }
+                guard let candidate = candidates.first else {
+                    completion(.success(""))
+                    return
+                }
+                guard let content = candidate["content"] as? [String: Any],
+                      let parts = content["parts"] as? [[String: Any]] else {
+                    completion(.failure(TranscriptionError.invalidResponse))
+                    return
+                }
+                let texts = parts.filter { $0["thought"] as? Bool != true }.compactMap { $0["text"] as? String }
+                completion(.success(texts.joined().trimmingCharacters(in: .whitespacesAndNewlines)))
             } catch {
                 completion(.failure(error))
             }

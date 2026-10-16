@@ -2,21 +2,35 @@ import Foundation
 
 /// Unified application logger: stderr + persistent file (tmp/whisper-me.log),
 /// to inspect app execution when launched via Finder/open (where stderr is discarded).
-/// File writes are force-flushed to preserve logs across sudden process termination.
+/// File writes and stderr output run asynchronously on a dedicated serial queue to avoid
+/// blocking callers or real-time audio threads with synchronous disk/stream IO.
 enum AppLog {
+    private static let queue = DispatchQueue(label: "com.whisper-me.log", qos: .utility)
     private static var cachedHandle: FileHandle?
+    private static let dateFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.dateFormat = "HH:mm:ss"
+        return df
+    }()
 
     static func log(_ message: String) {
-        FileHandle.standardError.write(Data("\(message)\n".utf8))
-        writeToFile(message)
+        queue.async {
+            FileHandle.standardError.write(Data("\(message)\n".utf8))
+            performWriteToFile(message)
+        }
     }
 
     static func writeToFile(_ message: String) {
+        queue.async {
+            performWriteToFile(message)
+        }
+    }
+
+    private static func performWriteToFile(_ message: String) {
         guard let fh = logFile() else { return }
         // Always append to the end of the file.
         fh.seekToEndOfFile()
         fh.write(Data("[\(stamp())] \(message)\n".utf8))
-        fh.synchronizeFile()   // Force flush to survive crashes
     }
 
     private static func logFile() -> FileHandle? {
@@ -31,8 +45,6 @@ enum AppLog {
     }
 
     private static func stamp() -> String {
-        let df = DateFormatter()
-        df.dateFormat = "HH:mm:ss"
-        return df.string(from: Date())
+        dateFormatter.string(from: Date())
     }
 }

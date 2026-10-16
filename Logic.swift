@@ -265,6 +265,37 @@ struct ModelOption: Equatable {
     }
 }
 
+/// Cleaning mode for filler words and hesitation sounds.
+enum CleaningMode: String, CaseIterable, Codable {
+    /// Native cleanup via model/API (Smart transcription for Gemini, system prompts/provider options for OpenRouter).
+    case smart = "smart"
+    /// Manual regex-based deletion filter.
+    case manual = "manual"
+    /// No cleanup (raw verbatim transcript).
+    case disabled = "disabled"
+
+    func title(for isRussian: Bool) -> String {
+        switch self {
+        case .smart:
+            return isRussian ? "Умный режим (модель / API)" : "Smart Mode (Model / API)"
+        case .manual:
+            return isRussian ? "Ручной фильтр (удаление слов)" : "Manual Filter (Regex)"
+        case .disabled:
+            return isRussian ? "Отключено (дословно)" : "Disabled (Verbatim)"
+        }
+    }
+
+    /// Whether native API parameters/prompts should be applied.
+    var usesNativeCleanup: Bool {
+        self == .smart
+    }
+
+    /// Whether local TextCleaner post-processing should be applied.
+    var usesManualCleaner: Bool {
+        self == .manual
+    }
+}
+
 /// Speech transcription provider.
 enum TranscriptionProvider: String, CaseIterable {
     case gemini
@@ -380,12 +411,43 @@ enum OpenRouterAPI {
     static let modelsURL = baseURL + "/models?output_modalities=transcription"
 
     /// Builds the transcription request payload.
-    static func transcriptionPayload(model: String, base64Audio: String) -> [String: Any] {
-        // OpenRouter's STT endpoint ignores prompt; cleanup happens locally.
-        [
+    /// When native cleanup is enabled, passes provider options according to OpenRouter STT documentation:
+    /// - For Google models (tag: google-ai-studio): transcription_config with mode: "smart"
+    /// - For OpenAI models (tag: openai) or Groq: prompt instruction to filter hesitations
+    static func transcriptionPayload(model: String, base64Audio: String, nativeCleanup: Bool = false) -> [String: Any] {
+        var payload: [String: Any] = [
             "model": model,
-            "input_audio": ["data": base64Audio, "format": "wav"],
+            "input_audio": ["data": base64Audio, "format": "wav"]
         ]
+
+        if nativeCleanup {
+            var options: [String: Any] = [:]
+            let lowerModel = model.lowercased()
+
+            if lowerModel.contains("google/") || lowerModel.contains("gemini") {
+                // Google AI Studio native schema for Interactions/Transcribe
+                options["google-ai-studio"] = [
+                    "transcription_config": [
+                        "mode": "smart"
+                    ]
+                ]
+            }
+
+            // OpenAI / Groq STT endpoints accept prompt parameter
+            let cleanupPrompt = "Transcribe the audio accurately into clean text. Omit hesitations and filler sounds like um, uh, ээ, мм, а-а."
+            options["openai"] = [
+                "prompt": cleanupPrompt
+            ]
+            options["groq"] = [
+                "prompt": cleanupPrompt
+            ]
+
+            payload["provider"] = [
+                "options": options
+            ]
+        }
+
+        return payload
     }
 
     /// Extracts transcript text from response. Returns nil if empty or invalid.
@@ -450,6 +512,23 @@ enum InterimDelta {
         var delta = words.suffix(words.count - previous.count).joined(separator: " ")
         delta += " "   // trailing separator: next delta pastes right after it
         return Result(delta: delta, words: words, revisedRange: revisedRange)
+    }
+}
+
+/// Only deliberate credential edits should create a Keychain override (including
+/// explicit deletion). Saving unrelated controls must not mask a future .env key.
+struct APIKeyDraft {
+    private let original: String
+    var value: String
+
+    init(value: String) {
+        original = value
+        self.value = value
+    }
+
+    var valueToSave: String? {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized == original.trimmingCharacters(in: .whitespacesAndNewlines) ? nil : normalized
     }
 }
 

@@ -10,7 +10,7 @@ import Foundation
 ///   response: {"text": "...", "usage": {...}}
 ///   error:    {"error": {"message": "..."}}
 final class OpenRouterTranscriber {
-    private let session = URLSession(configuration: .default)
+    private let session = URLSession.shared
 
     /// Batch audio is sent as a whole, so timeout is generous for longer recordings.
     private static let requestTimeout: TimeInterval = 60.0
@@ -32,8 +32,10 @@ final class OpenRouterTranscriber {
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = Self.requestTimeout
 
+        let nativeCleanup = SettingsManager.shared.cleaningMode.usesNativeCleanup
         let payload = OpenRouterAPI.transcriptionPayload(model: model,
-                                                          base64Audio: audioData.base64EncodedString())
+                                                          base64Audio: audioData.base64EncodedString(),
+                                                          nativeCleanup: nativeCleanup)
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: payload)
         } catch {
@@ -78,7 +80,7 @@ final class OpenRouterTranscriber {
         }
         request.timeoutInterval = modelsTimeout
 
-        URLSession(configuration: .default).dataTask(with: request) { data, response, error in
+        URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
                 completion(.failure(error))
                 return

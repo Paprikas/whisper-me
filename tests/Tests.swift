@@ -44,6 +44,7 @@ struct TestRunner {
         testOpenRouterResponses()
         testTranscriptionErrors()
         testHotKeyCombo()
+        testCleaningMode()
         testAppLanguage()
         testTextCleaner()
 
@@ -239,11 +240,37 @@ struct TestRunner {
         }
         checkEqual("OpenRouter: base64 audio data", audio["data"] as? String, "QUJD")
         checkEqual("OpenRouter: audio format is wav", audio["format"] as? String, "wav")
-        check("OpenRouter: no prompt in payload",
+        check("OpenRouter: no prompt in default payload",
               payload["prompt"] == nil && audio["prompt"] == nil)
+        check("OpenRouter: no provider options when nativeCleanup is false",
+              payload["provider"] == nil)
+
+        let nativePayload = OpenRouterAPI.transcriptionPayload(model: "google/gemini-3.5-transcribe",
+                                                              base64Audio: "QUJD",
+                                                              nativeCleanup: true)
+        check("OpenRouter: provider options present when nativeCleanup is true",
+              nativePayload["provider"] != nil)
+        if let prov = nativePayload["provider"] as? [String: Any],
+           let opts = prov["options"] as? [String: Any] {
+            if let googleOpt = opts["google-ai-studio"] as? [String: Any],
+               let tConfig = googleOpt["transcription_config"] as? [String: Any] {
+                checkEqual("OpenRouter: google mode is smart", tConfig["mode"] as? String, "smart")
+            } else {
+                check("OpenRouter: google-ai-studio options present", false)
+            }
+            if let openaiOpt = opts["openai"] as? [String: Any] {
+                check("OpenRouter: openai prompt present", (openaiOpt["prompt"] as? String)?.isEmpty == false)
+            } else {
+                check("OpenRouter: openai options present", false)
+            }
+        } else {
+            check("OpenRouter: provider.options dictionary present", false)
+        }
 
         check("OpenRouter: valid JSON serialization",
               JSONSerialization.isValidJSONObject(payload))
+        check("OpenRouter: valid JSON serialization with native cleanup",
+              JSONSerialization.isValidJSONObject(nativePayload))
     }
 
     // MARK: - OpenRouter: Responses
@@ -354,6 +381,19 @@ struct TestRunner {
     }
 
     // MARK: - AppLanguage & Localization
+
+    static func testCleaningMode() {
+        checkEqual("CleaningMode: smart title ru", CleaningMode.smart.title(for: true), "Умный режим (модель / API)")
+        checkEqual("CleaningMode: smart title en", CleaningMode.smart.title(for: false), "Smart Mode (Model / API)")
+        checkEqual("CleaningMode: manual title ru", CleaningMode.manual.title(for: true), "Ручной фильтр (удаление слов)")
+        checkEqual("CleaningMode: disabled title ru", CleaningMode.disabled.title(for: true), "Отключено (дословно)")
+
+        check("CleaningMode: smart usesNativeCleanup", CleaningMode.smart.usesNativeCleanup)
+        check("CleaningMode: smart does NOT use manual cleaner", !CleaningMode.smart.usesManualCleaner)
+        check("CleaningMode: manual uses manual cleaner", CleaningMode.manual.usesManualCleaner)
+        check("CleaningMode: manual does NOT use native cleanup", !CleaningMode.manual.usesNativeCleanup)
+        check("CleaningMode: disabled uses neither", !CleaningMode.disabled.usesNativeCleanup && !CleaningMode.disabled.usesManualCleaner)
+    }
 
     static func testAppLanguage() {
         checkEqual("AppLanguage: explicit en", AppLanguage.resolveLanguage(preference: .en), "en")
